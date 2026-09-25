@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import 'html-midi-player';
+import * as Tone from 'tone';
 import type { PartRead } from '../types';
 import { midiUrl, partMidiUrl } from '../api';
 
@@ -48,7 +49,17 @@ export default function PartPlayer({ scoreId, parts }: PartPlayerProps) {
         </select>
       </div>
 
-      <midi-player src={currentMidiUrl} sound-font={SOUND_FONT_URL} />
+      {/*
+        html-midi-player only calls Tone.context.resume() to unlock audio,
+        which is enough on desktop but not reliably on iOS Safari/WebKit -
+        Tone.js's own docs call for Tone.start() there, which does extra
+        iOS-specific unlocking (playing a silent buffer) that resume() alone
+        skips. Tone.start() is safe to call repeatedly. Must stay synchronous
+        with the tap (no await before it) or iOS won't count it as a gesture.
+      */}
+      <div onPointerDown={() => { void Tone.start(); }}>
+        <midi-player src={currentMidiUrl} sound-font={SOUND_FONT_URL} />
+      </div>
 
       <div style={{ marginTop: '12px' }}>
         <a

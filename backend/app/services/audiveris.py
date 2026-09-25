@@ -112,6 +112,40 @@ def _render_pdf_to_pngs(pdf_path: Path, output_dir: Path, dpi: int) -> list[Path
     return pages
 
 
+def _strip_jpeg_trailer(input_file: Path, work_dir: Path) -> Path:
+    """Strip a trailing embedded image some phone-camera JPEGs carry after the
+    primary photo (Multi-Picture Format secondary/depth shot). Audiveris reads
+    each embedded image in the file as a separate sheet and — same as the
+    multi-page PDF case above — refuses to export the whole Book if any of
+    them fails validation, even though the user only meant to upload one page.
+    Returns the original path unchanged if there's nothing to strip.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out_path = work_dir / input_file.name
+    try:
+        result = subprocess.run(
+            ["exiftool", "-trailer:all=", "-o", str(out_path), str(input_file)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as exc:
+        logger.warning("exiftool failed for %s: %s", input_file.name, exc)
+        return input_file
+
+    if result.returncode != 0 or not out_path.exists():
+        logger.warning("exiftool trailer strip failed for %s: %s", input_file.name, result.stderr[:300])
+        return input_file
+
+    if out_path.stat().st_size == input_file.stat().st_size:
+        out_path.unlink(missing_ok=True)
+        return input_file  # nothing was embedded, no change needed
+
+    logger.info(
+        "Stripped embedded trailer image from %s (%d -> %d bytes)",
+        input_file.name, input_file.stat().st_size, out_path.stat().st_size,
+    )
+    return out_path
+
+
 async def prepare_input(input_file: Path, work_dir: Path) -> list[Path]:
     """
     Return the list of files to feed to Audiveris.
@@ -124,6 +158,12 @@ async def prepare_input(input_file: Path, work_dir: Path) -> list[Path]:
     Returns the same input_file in a list if no pre-processing is needed.
     """
     suffix = input_file.suffix.lower()
+
+    if suffix in (".jpg", ".jpeg"):
+        input_file = await asyncio.get_event_loop().run_in_executor(
+            None, _strip_jpeg_trailer, input_file, work_dir
+        )
+
     if suffix != ".pdf":
         return [input_file]
 

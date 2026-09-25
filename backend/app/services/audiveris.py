@@ -59,6 +59,24 @@ def _get_pdf_page_size_pts(pdf_path: Path) -> tuple[float, float] | None:
     return None
 
 
+def _get_pdf_page_count(pdf_path: Path) -> int | None:
+    """Return the number of pages in a PDF using ghostscript, or None on error."""
+    try:
+        result = subprocess.run(
+            [
+                "gs", "-dNOPAUSE", "-dBATCH", "-dQUIET",
+                "-sDEVICE=bbox",
+                str(pdf_path),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        count = sum(1 for line in result.stderr.splitlines() if line.startswith("%%BoundingBox:"))
+        return count or None
+    except Exception as exc:
+        logger.warning("gs page count failed: %s", exc)
+        return None
+
+
 def _safe_dpi_for_page(width_pt: float, height_pt: float) -> int:
     """Return a DPI that keeps the rasterised page under AUDIVERIS_MAX_PIXELS."""
     import math
@@ -97,7 +115,12 @@ def _render_pdf_to_pngs(pdf_path: Path, output_dir: Path, dpi: int) -> list[Path
 async def prepare_input(input_file: Path, work_dir: Path) -> list[Path]:
     """
     Return the list of files to feed to Audiveris.
-    For PDFs whose first page exceeds Audiveris's pixel limit, rasterise first.
+
+    Rasterises the PDF to per-page PNGs whenever there's more than one page —
+    Audiveris refuses to export a multi-sheet Book at all if any single sheet
+    fails validation, so splitting multi-page PDFs lets run_omr() process each
+    page independently and keep whatever pages succeed. Also rasterises a
+    single oversized page to fit Audiveris's pixel limit.
     Returns the same input_file in a list if no pre-processing is needed.
     """
     suffix = input_file.suffix.lower()
@@ -114,15 +137,28 @@ async def prepare_input(input_file: Path, work_dir: Path) -> list[Path]:
     w_in = w_pt / 72.0
     h_in = h_pt / 72.0
     pixels_at_300 = (w_in * 300) * (h_in * 300)
-    if pixels_at_300 <= AUDIVERIS_MAX_PIXELS:
+    oversized = pixels_at_300 > AUDIVERIS_MAX_PIXELS
+
+    page_count = _get_pdf_page_count(input_file)
+    multi_page = page_count is not None and page_count > 1
+
+    if not oversized and not multi_page:
         return [input_file]
 
-    logger.info(
-        "PDF page %.1f×%.1f in (%.0fM px at 300 DPI) exceeds limit — "
-        "rasterising at %d DPI (%.0fM px)",
-        w_in, h_in, pixels_at_300 / 1e6, dpi,
-        (w_in * dpi) * (h_in * dpi) / 1e6,
-    )
+    if oversized:
+        logger.info(
+            "PDF page %.1f×%.1f in (%.0fM px at 300 DPI) exceeds limit — "
+            "rasterising at %d DPI (%.0fM px)",
+            w_in, h_in, pixels_at_300 / 1e6, dpi,
+            (w_in * dpi) * (h_in * dpi) / 1e6,
+        )
+    else:
+        logger.info(
+            "Multi-page PDF (%d pages) — rasterising at %d DPI so pages are "
+            "processed individually (one bad page can't abort the whole export)",
+            page_count, dpi,
+        )
+
     png_dir = work_dir / "pages"
     pages = await asyncio.get_event_loop().run_in_executor(
         None, _render_pdf_to_pngs, input_file, png_dir, dpi

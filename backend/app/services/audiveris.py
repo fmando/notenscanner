@@ -261,14 +261,37 @@ async def _run_audiveris_once(inputs: list[Path], output_dir: Path, ocr: bool = 
 
 
 def _collect_omr_result(stem: str, output_dir: Path) -> Path | None:
-    """Return the XML path produced for *stem*, or None if nothing was written."""
+    """Return the XML path produced for *stem*, or None if nothing was written.
+
+    Audiveris writes a plain "{stem}.xml"/".mxl" when it finds one musical
+    score on the sheet, but "{stem}.mvt1.mxl", ".mvt2.mxl", ... when it
+    detects several distinct movements/pieces on the same physical page
+    (seen e.g. with photographed hymnal pages carrying two hymns) - those
+    were previously not recognised at all here, silently dropping the whole
+    page. Merge them into one file for this page instead.
+    """
     xml_path = output_dir / f"{stem}.xml"
-    mxl_path = output_dir / f"{stem}.mxl"
     if xml_path.exists():
         return xml_path
+
+    mxl_path = output_dir / f"{stem}.mxl"
     if mxl_path.exists():
         return _extract_mxl(mxl_path)
-    return None
+
+    mvt_files = sorted(output_dir.glob(f"{stem}.mvt*.mxl"))
+    if not mvt_files:
+        return None
+    if len(mvt_files) == 1:
+        return _extract_mxl(mvt_files[0])
+
+    mvt_xml_paths = [_extract_mxl(p) for p in mvt_files]
+    merged_path = output_dir / f"{stem}.movements-merged.xml"
+    _merge_musicxml_files(mvt_xml_paths, merged_path)
+    logger.info(
+        "%s: merged %d movements into one page (%s)",
+        stem, len(mvt_files), merged_path.name,
+    )
+    return merged_path
 
 
 def _merge_musicxml_files(xml_paths: list[Path], output_path: Path) -> None:
@@ -341,19 +364,11 @@ async def run_omr(inputs: list[Path], output_dir: Path, ocr: bool = False) -> Pa
         # ── original single-call path ──────────────────────────────────────
         await _run_audiveris_once(inputs, output_dir, ocr=ocr)
 
-        xml_files = list(output_dir.glob("*.xml"))
-        mxl_files = list(output_dir.glob("*.mxl"))
-
-        if not xml_files and not mxl_files:
+        result = _collect_omr_result(inputs[0].stem, output_dir)
+        if result is None:
             raise RuntimeError("Audiveris produced no output")
-
-        if xml_files:
-            logger.info("Audiveris produced XML: %s", xml_files[0])
-            return xml_files[0]
-
-        mxl_files.sort()
-        logger.info("Audiveris produced MXL: %s — extracting", mxl_files[0])
-        return _extract_mxl(mxl_files[0])
+        logger.info("Audiveris produced: %s", result)
+        return result
 
     # ── multi-page path: one Audiveris call per page ───────────────────────
     logger.info("Multi-page input (%d pages) — processing individually", len(inputs))

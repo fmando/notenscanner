@@ -3,6 +3,16 @@ import 'html-midi-player';
 import type { PartRead } from '../types';
 import { midiUrl, partMidiUrl } from '../api';
 
+// Explicit baseURL for Magenta's SoundFont/Instrument classes (@magenta/music
+// core/soundfont.js) - they fetch "{baseURL}/soundfont.json", then per used
+// instrument "{baseURL}/{instrument}/instrument.json" and
+// "{baseURL}/{instrument}/p{pitch}_v{velocity}.mp3". The bucket itself is
+// fine (verified reachable); the bug was leaving the HTML attribute as an
+// empty string, which XHTML treats as "attribute present, value empty" -
+// baseURL="" - so every fetch went to OUR OWN origin's root  instead of
+// here, 404ing silently (audio stayed mute but playback state still ran).
+const SOUND_FONT_URL = 'https://storage.googleapis.com/magentadata/js/soundfonts/sgm_plus';
+
 interface PartPlayerProps {
   scoreId: string;
   parts: PartRead[];
@@ -38,7 +48,7 @@ export default function PartPlayer({ scoreId, parts }: PartPlayerProps) {
         </select>
       </div>
 
-      <midi-player src={currentMidiUrl} sound-font="" />
+      <midi-player src={currentMidiUrl} sound-font={SOUND_FONT_URL} />
 
       <div style={{ marginTop: '12px' }}>
         <a

@@ -244,17 +244,20 @@ async def get_svg_info(score_id: str):
     return {"pages": len(pages)}
 
 
-def _original_file(score_id: str) -> tuple:
-    """Return (upload_dir, file_path, ext) for the original upload."""
+def _original_files(score_id: str) -> tuple:
+    """Return (upload_dir, [file_path, ...]) for the original upload(s), in
+    page order. Multi-file uploads (input-0000.*, input-0001.*, ...) yield
+    one path per uploaded page; legacy single-file scores (input.<ext>)
+    yield a single-item list.
+    """
     from app.services.storage import score_upload_dir
     with Session(_get_engine()) as db:
-        score = _require_ready_score(db, score_id)
-        filename = score.filename
+        _require_ready_score(db, score_id)
     upload_dir = score_upload_dir(score_id)
-    file_path = upload_dir / filename
-    if not file_path.exists():
+    files = sorted(upload_dir.glob("input-*.*")) or sorted(upload_dir.glob("input.*"))
+    if not files:
         raise HTTPException(status_code=404, detail="Original file not found")
-    return upload_dir, file_path, file_path.suffix.lower()
+    return upload_dir, files
 
 
 async def _render_pdf_page_png(pdf_path: Path, page: int, output_path: Path) -> None:
@@ -286,12 +289,14 @@ async def _render_pdf_page_png(pdf_path: Path, page: int, output_path: Path) -> 
 def get_original_info(score_id: str):
     """Return page count for the original upload."""
     _validate_score_id(score_id)
-    _, file_path, ext = _original_file(score_id)
-    if ext == ".pdf":
+    _, files = _original_files(score_id)
+    if len(files) == 1 and files[0].suffix.lower() == ".pdf":
         from pypdf import PdfReader
-        pages = len(PdfReader(str(file_path)).pages)
+        pages = len(PdfReader(str(files[0])).pages)
     else:
-        pages = 1
+        # One uploaded file per page (images), or several PDFs uploaded
+        # together — each counts as one page here (see get_original_page).
+        pages = len(files)
     return {"pages": pages}
 
 
@@ -299,23 +304,41 @@ def get_original_info(score_id: str):
 async def get_original_page(score_id: str, page: int):
     """Serve a page of the original as PNG (renders PDF pages on demand)."""
     _validate_score_id(score_id)
-    upload_dir, file_path, ext = _original_file(score_id)
+    upload_dir, files = _original_files(score_id)
 
     image_types = {
         ".png": "image/png", ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg", ".tiff": "image/tiff", ".tif": "image/tiff",
     }
 
-    if ext in image_types:
-        if page != 1:
-            raise HTTPException(status_code=404, detail="Page not found")
-        return FileResponse(str(file_path), media_type=image_types[ext])
-
-    if ext == ".pdf":
+    if len(files) == 1 and files[0].suffix.lower() == ".pdf":
+        file_path = files[0]
         cache = upload_dir / f"preview_p{page}.png"
         if not cache.exists():
             try:
                 await _render_pdf_page_png(file_path, page, cache)
+            except Exception as exc:
+                logger.error("PDF page render failed: %s", exc)
+                raise HTTPException(status_code=500, detail="Failed to render PDF page")
+        if not cache.exists():
+            raise HTTPException(status_code=500, detail="Rendered page not found")
+        return FileResponse(str(cache), media_type="image/png")
+
+    # Multi-file upload (or a single image): page N is the Nth uploaded file.
+    if page < 1 or page > len(files):
+        raise HTTPException(status_code=404, detail="Page not found")
+    file_path = files[page - 1]
+    ext = file_path.suffix.lower()
+
+    if ext in image_types:
+        return FileResponse(str(file_path), media_type=image_types[ext])
+
+    if ext == ".pdf":
+        # A PDF among several uploaded files — show its first page only.
+        cache = upload_dir / f"preview_multi_p{page}.png"
+        if not cache.exists():
+            try:
+                await _render_pdf_page_png(file_path, 1, cache)
             except Exception as exc:
                 logger.error("PDF page render failed: %s", exc)
                 raise HTTPException(status_code=500, detail="Failed to render PDF page")

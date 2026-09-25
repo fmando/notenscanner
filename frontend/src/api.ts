@@ -13,9 +13,15 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-export async function uploadScore(file: File, ocr: boolean = false): Promise<ScoreRead> {
+export async function uploadScore(
+  files: File | File[],
+  ocr: boolean = false
+): Promise<ScoreRead> {
+  const fileList = Array.isArray(files) ? files : [files];
   const formData = new FormData();
-  formData.append('file', file);
+  for (const file of fileList) {
+    formData.append('files', file);
+  }
   formData.append('ocr', String(ocr));
   const response = await api.post<ScoreRead>('/api/scores', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },

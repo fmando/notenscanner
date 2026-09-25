@@ -13,12 +13,16 @@ export default function UploadZone({ onUploaded }: UploadZoneProps) {
   const [ocrEnabled, setOcrEnabled] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const handleFile = useCallback(
-    async (file: File) => {
+  const handleFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) return;
       setError(null);
       setIsUploading(true);
       try {
-        const score = await uploadScore(file, ocrEnabled);
+        // Sorted by filename so page order is predictable regardless of the
+        // order the OS/browser reports selected or dropped files in.
+        const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name));
+        const score = await uploadScore(sorted, ocrEnabled);
         onUploaded(score);
       } catch (err: unknown) {
         const message =
@@ -45,12 +49,12 @@ export default function UploadZone({ onUploaded }: UploadZoneProps) {
     (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setIsDragging(false);
-      const file = e.dataTransfer.files[0];
-      if (file) {
-        handleFile(file);
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length > 0) {
+        handleFiles(files);
       }
     },
-    [handleFile]
+    [handleFiles]
   );
 
   const handleClick = useCallback(() => {
@@ -61,14 +65,14 @@ export default function UploadZone({ onUploaded }: UploadZoneProps) {
 
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) {
-        handleFile(file);
-        // Reset so same file can be re-uploaded
+      const files = Array.from(e.target.files ?? []);
+      if (files.length > 0) {
+        handleFiles(files);
+        // Reset so the same file(s) can be re-uploaded
         e.target.value = '';
       }
     },
-    [handleFile]
+    [handleFiles]
   );
 
   const zoneStyle: React.CSSProperties = {
@@ -98,6 +102,7 @@ export default function UploadZone({ onUploaded }: UploadZoneProps) {
         <input
           ref={inputRef}
           type="file"
+          multiple
           accept=".png,.jpg,.jpeg,.tiff,.tif,.pdf"
           style={{ display: 'none' }}
           onChange={handleInputChange}
@@ -111,7 +116,8 @@ export default function UploadZone({ onUploaded }: UploadZoneProps) {
           </p>
         )}
         <p style={{ color: '#999', fontSize: '13px', marginTop: '8px', marginBottom: 0 }}>
-          Accepted: PNG, JPG, JPEG, TIFF, PDF
+          Accepted: PNG, JPG, JPEG, TIFF, PDF — mehrere Dateien werden zu einem
+          Stück zusammengefügt (Seitenreihenfolge nach Dateiname)
         </p>
       </div>
       <label

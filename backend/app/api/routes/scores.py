@@ -47,18 +47,27 @@ async def process_score(score_id: str, ocr: bool = False):
 
         try:
             upload_dir = score_upload_dir(score_id)
-            input_files = list(upload_dir.glob("input.*"))
+            # New indexed naming (input-0000.*, input-0001.*, ...) is used for
+            # multi-file uploads; legacy single-file scores are still named
+            # input.<ext>. A given score only ever has one of the two.
+            input_files = sorted(upload_dir.glob("input-*.*")) or sorted(upload_dir.glob("input.*"))
             if not input_files:
-                raise FileNotFoundError(f"No input file found in {upload_dir}")
-            input_file = input_files[0]
+                raise FileNotFoundError(f"No input file(s) found in {upload_dir}")
 
             output_dir = score_output_dir(score_id)
             work_dir = output_dir / "work"
             work_dir.mkdir(parents=True, exist_ok=True)
 
-            # Step 1 – prepare input (rasterise oversized PDFs if needed)
+            # Step 1 – prepare inputs (strip embedded secondary JPEG images,
+            # rasterise oversized/multi-page PDFs). Each uploaded file is
+            # prepared independently (own work subdir, so per-file page
+            # rasterisation can't collide) and the results are concatenated
+            # in upload order — multiple uploaded photos become, in effect,
+            # consecutive pages of one book for run_omr() below.
             _set_status("preparing")
-            inputs = await prepare_input(input_file, work_dir)
+            inputs: list = []
+            for idx, f in enumerate(input_files):
+                inputs.extend(await prepare_input(f, work_dir / f"src{idx:03d}"))
 
             # Step 2 – Audiveris OMR
             _set_status("transcribing")
@@ -96,20 +105,33 @@ async def process_score(score_id: str, ocr: bool = False):
 @router.post("", response_model=ScoreRead, status_code=201)
 async def upload_score(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     ocr: bool = Form(False),
 ):
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type '{suffix}'. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    suffixes = []
+    for f in files:
+        suffix = Path(f.filename).suffix.lower()
+        if suffix not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type '{suffix}' ({f.filename}). Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+            )
+        suffixes.append(suffix)
+
+    if len(files) == 1:
+        display_name = files[0].filename
+    else:
+        display_name = f"{files[0].filename} + {len(files) - 1} weitere Seite" + (
+            "n" if len(files) > 2 else ""
         )
 
     with Session(_get_engine()) as db:
         score = Score(
-            filename=f"input{suffix}",
-            original_filename=file.filename,
+            filename=f"input{suffixes[0]}" if len(files) == 1 else "input-multi",
+            original_filename=display_name,
             status="pending",
         )
         db.add(score)
@@ -117,9 +139,14 @@ async def upload_score(
         db.refresh(score)
 
         upload_dir = score_upload_dir(score.id)
-        dest = upload_dir / f"input{suffix}"
-        content = await file.read()
-        dest.write_bytes(content)
+        if len(files) == 1:
+            # Unchanged legacy naming for the common single-file case.
+            dest = upload_dir / f"input{suffixes[0]}"
+            dest.write_bytes(await files[0].read())
+        else:
+            for idx, (f, suffix) in enumerate(zip(files, suffixes)):
+                dest = upload_dir / f"input-{idx:04d}{suffix}"
+                dest.write_bytes(await f.read())
 
         background_tasks.add_task(process_score, score.id, ocr)
 

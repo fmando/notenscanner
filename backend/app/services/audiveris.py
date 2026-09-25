@@ -327,9 +327,12 @@ async def run_omr(inputs: list[Path], output_dir: Path, ocr: bool = False) -> Pa
     Returns path to the generated MusicXML file.
 
     For single inputs the original single-call behaviour is used.
-    For multiple inputs (multi-page PDFs rasterised to per-page PNGs) each
-    page is processed individually so that one slow or failing page does not
-    abort the whole job, and the results are merged into one MusicXML file.
+    For multiple inputs — multi-page PDFs rasterised to per-page PNGs, or
+    several separately uploaded pages/photos of one piece — each page is
+    processed individually so that one slow or failing page does not abort
+    the whole job, and the results are merged into one MusicXML file in the
+    order given (callers are responsible for passing inputs in page order;
+    this function does not re-sort).
     """
     if len(inputs) == 0:
         raise RuntimeError("run_omr called with no inputs")
@@ -356,9 +359,16 @@ async def run_omr(inputs: list[Path], output_dir: Path, ocr: bool = False) -> Pa
     logger.info("Multi-page input (%d pages) — processing individually", len(inputs))
     xml_paths: list[Path] = []
 
-    for inp in sorted(inputs):  # sorted so pages are merged in order
+    for i, inp in enumerate(inputs):
+        # Each page gets its own output subdir: inputs coming from different
+        # uploaded files can share a basename (e.g. two uploaded PDFs each
+        # rasterising to page-0001.png), and Audiveris names its output after
+        # the input's basename — a shared output_dir would let one page's
+        # result silently overwrite another's.
+        page_output_dir = output_dir / f"omr_{i:04d}"
+        page_output_dir.mkdir(parents=True, exist_ok=True)
         try:
-            await _run_audiveris_once([inp], output_dir, ocr=ocr)
+            await _run_audiveris_once([inp], page_output_dir, ocr=ocr)
         except asyncio.TimeoutError:
             logger.warning("Page %s timed out — skipping", inp.name)
             continue
@@ -366,7 +376,7 @@ async def run_omr(inputs: list[Path], output_dir: Path, ocr: bool = False) -> Pa
             logger.warning("Page %s error — skipping: %s", inp.name, exc)
             continue
 
-        result = _collect_omr_result(inp.stem, output_dir)
+        result = _collect_omr_result(inp.stem, page_output_dir)
         if result is not None:
             xml_paths.append(result)
             logger.info("Page %s → %s", inp.name, result.name)

@@ -28,7 +28,7 @@ Upload → Audiveris OMR → MuseScore → SVG-Anzeige im Browser + MIDI-Wiederg
 | Frontend | React 18 + TypeScript + Vite |
 | Notenansicht | MuseScore SVG (serverseitig gerendert) |
 | MIDI-Wiedergabe | html-midi-player (Tone.js) |
-| Reverse Proxy | nginx |
+| Reverse Proxy | Caddy (separater Container) — nginx im App-Container nur als Alternative, siehe unten |
 
 ---
 
@@ -129,20 +129,41 @@ systemctl daemon-reload
 systemctl enable --now sheet-music-xvfb sheet-music-backend
 ```
 
-### 7. nginx
+### 7. Reverse Proxy
+
+Das Frontend wird von FastAPI selbst ausgeliefert (`FRONTEND_DIST` in `backend/.env`) — ein lokaler
+Webserver im App-Container ist dafuer nicht mehr noetig. Zwei Optionen:
+
+**a) Caddy in einem separaten Container/Host** (so laeuft die Produktivinstanz):
+
+```
+# deploy/Caddyfile, im Reverse-Proxy-Container:
+meine-domain.de {
+    reverse_proxy APP_CONTAINER_IP:8000 {
+        flush_interval -1        # SSE-Stream (Status-Updates) funktioniert nur so
+        transport http {
+            read_timeout  310s   # Grosse Uploads / lange OMR-Verarbeitung
+            write_timeout 310s
+        }
+    }
+}
+```
+
+Caddy holt das TLS-Zertifikat automatisch via Let's Encrypt, kein `certbot` noetig. `CORS_ORIGINS`
+in `backend/.env` muss auf dieselbe Domain zeigen (sonst blockt der Browser die Frontend-Requests).
+
+**b) nginx direkt im App-Container** (Alternative, z. B. wenn kein separater Proxy-Host existiert):
 
 ```bash
 cp /opt/sheet-music-web/deploy/nginx.conf /etc/nginx/sites-available/meine-domain.de
 sed -i 's/DEINE_DOMAIN/meine-domain.de/' /etc/nginx/sites-available/meine-domain.de
 ln -s /etc/nginx/sites-available/meine-domain.de /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
-```
-
-### 8. HTTPS mit Let's Encrypt
-
-```bash
 certbot --nginx -d meine-domain.de
 ```
+
+`install.sh <domain>` richtet automatisch Variante (b) ein.
 
 ---
 
@@ -165,6 +186,16 @@ DATA_DIR=/opt/sheet-music-web/data
 MUSESCORE_BIN=musescore3
 XVFB_DISPLAY=:99
 AUDIVERIS_BIN=/opt/audiveris/bin/Audiveris
+
+# Pfad zum gebauten Frontend (dist/). Wenn gesetzt, serviert FastAPI das
+# Frontend selbst — kein nginx im Container noetig.
+FRONTEND_DIST=/opt/sheet-music-web/frontend/dist
+
+# Kommagetrennte Liste erlaubter CORS-Origins. Ersetzt den Default
+# (localhost:5173,3000) komplett, statt ihn zu ergaenzen — bei Bedarf
+# die Dev-Origins hier mit auffuehren. Muss zur Domain im Reverse-Proxy
+# passen, siehe "Reverse Proxy" oben.
+CORS_ORIGINS=https://meine-domain.de
 ```
 
 ---
@@ -232,7 +263,8 @@ sheet-music-web/
 ├── deploy/
 │   ├── sheet-music-xvfb.service
 │   ├── sheet-music-backend.service
-│   ├── nginx.conf
+│   ├── nginx.conf       # Alternative: Reverse Proxy direkt im App-Container
+│   ├── Caddyfile         # Produktiv-Setup: Reverse Proxy in separatem Container
 │   └── backend.env.example
 ├── install.sh   # Vollstaendiges Installationsscript
 └── deploy.sh    # Update-Script

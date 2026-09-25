@@ -2,7 +2,7 @@
 # Deploy frontend and restart backend (no Docker required)
 set -e
 
-REPO=/root/ccode/sheet-music-web
+REPO=/opt/sheet-music-web
 
 echo "==> Building frontend..."
 cd "$REPO/frontend"
